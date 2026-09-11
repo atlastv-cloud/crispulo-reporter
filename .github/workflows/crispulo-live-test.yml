@@ -1,0 +1,129 @@
+name: Crispulo Live Test
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/5 * * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  detect-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg python3
+          python3 -m pip install --upgrade yt-dlp
+
+      - name: Read channel configuration
+        id: config
+        shell: bash
+        run: |
+          VIDEO_ID=$(python3 - <<'PY'
+          import json
+          with open('config/channel.json', encoding='utf-8') as f:
+              c=json.load(f)
+          print(c['source']['video_id'])
+          PY
+          )
+          echo "video_id=$VIDEO_ID" >> "$GITHUB_OUTPUT"
+          echo "YouTube video ID: $VIDEO_ID"
+
+      - name: Detect LIVE status and resolve stream
+        id: live
+        shell: bash
+        run: |
+          set +e
+          mkdir -p test-output
+          yt-dlp --no-warnings --dump-single-json --skip-download "https://www.youtube.com/watch?v=${{ steps.config.outputs.video_id }}" > test-output/metadata.json 2> test-output/yt-dlp.log
+          RC=$?
+          if [ "$RC" -ne 0 ]; then
+            echo "live=false" >> "$GITHUB_OUTPUT"
+            echo "yt-dlp could not resolve the source. It may be offline or temporarily unavailable."
+            exit 0
+          fi
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          p='test-output/metadata.json'
+          d=json.load(open(p, encoding='utf-8'))
+          is_live = d.get('is_live') is True or d.get('live_status') == 'is_live'
+          print('live=' + ('true' if is_live else 'false'))
+          print('title=' + str(d.get('title','')))
+          print('live_status=' + str(d.get('live_status','unknown')))
+          PY
+          echo "Detector finished."
+
+      - name: Stop cleanly when offline
+        if: steps.live.outputs.live != 'true'
+        run: |
+          echo "Crispulo Reporter is OFFLINE. No HLS test will be started."
+
+      - name: Resolve direct media URL
+        if: steps.live.outputs.live == 'true'
+        id: media
+        shell: bash
+        run: |
+          yt-dlp --no-warnings -g -f 'best[protocol^=http][height<=720]/best' "https://www.youtube.com/watch?v=${{ steps.config.outputs.video_id }}" > test-output/media_url.txt
+          test -s test-output/media_url.txt
+          echo "Direct media URL resolved."
+
+      - name: Generate short HLS test
+        if: steps.live.outputs.live == 'true'
+        shell: bash
+        run: |
+          mkdir -p test-output/hls
+          timeout 75s ffmpeg -hide_banner -loglevel warning \
+            -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
+            -i "$(head -n1 test-output/media_url.txt)" \
+            -map 0:v:0 -map 0:a:0? \
+            -c:v copy -c:a aac -b:a 128k \
+            -f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments+append_list \
+            test-output/hls/index.m3u8 || true
+
+          test -s test-output/hls/index.m3u8
+          echo "HLS playlist generated successfully."
+          ls -lh test-output/hls
+
+      - name: Create test report
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo '# Crispulo Reporter — automated test'
+            echo
+            echo "- Checked at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            echo "- Video ID: ${{ steps.config.outputs.video_id }}"
+            echo "- LIVE detected: ${{ steps.live.outputs.live || 'false' }}"
+            echo "- Title: ${{ steps.live.outputs.title || 'N/A' }}"
+            echo "- Live status: ${{ steps.live.outputs.live_status || 'N/A' }}"
+            if [ -s test-output/hls/index.m3u8 ]; then
+              echo '- HLS generation: SUCCESS'
+              echo '- Playlist: test-output/hls/index.m3u8'
+            else
+              echo '- HLS generation: NOT RUN or FAILED'
+            fi
+          } > test-output/report.md
+
+      - name: Upload HLS test artifact
+        if: steps.live.outputs.live == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crispulo-hls-test-${{ github.run_number }}
+          path: test-output/
+          retention-days: 2
+
+      - name: Upload offline/diagnostic report
+        if: steps.live.outputs.live != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: crispulo-offline-check-${{ github.run_number }}
+          path: test-output/
+          retention-days: 2
