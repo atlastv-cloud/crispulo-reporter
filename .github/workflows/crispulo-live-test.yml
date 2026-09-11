@@ -49,16 +49,13 @@ jobs:
           set +e
           mkdir -p test-output
           URL="https://www.youtube.com/watch?v=${{ steps.config.outputs.video_id }}"
+          rm -f test-output/metadata.json test-output/metadata-retry.json
 
-          # First attempt: normal YouTube extraction.
           yt-dlp --no-warnings --dump-single-json --skip-download "$URL" > test-output/metadata.json 2> test-output/yt-dlp.log
           RC=$?
 
-          # Second attempt: use a different YouTube player client if the first
-          # attempt failed. This helps distinguish a temporary extractor issue
-          # from a genuinely offline source.
           if [ "$RC" -ne 0 ] || ! python3 -m json.tool test-output/metadata.json >/dev/null 2>&1; then
-            echo "Primary yt-dlp metadata attempt failed; retrying with web client..."
+            echo "Primary metadata attempt failed; retrying with web client..."
             yt-dlp --no-warnings --extractor-args 'youtube:player_client=web' --dump-single-json --skip-download "$URL" > test-output/metadata-retry.json 2> test-output/yt-dlp-retry.log
             RC2=$?
             if [ "$RC2" -eq 0 ] && python3 -m json.tool test-output/metadata-retry.json >/dev/null 2>&1; then
@@ -71,14 +68,16 @@ jobs:
             echo "status=unknown" >> "$GITHUB_OUTPUT"
             echo "live=false" >> "$GITHUB_OUTPUT"
             echo "reason=yt-dlp could not obtain valid metadata after two attempts" >> "$GITHUB_OUTPUT"
-            echo "STATUS=UNKNOWN (extraction/metadata failure)"
+            echo "STATUS=UNKNOWN"
             exit 0
           fi
 
           python3 - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           d=json.load(open('test-output/metadata.json', encoding='utf-8'))
-          status=d.get('live_status') or ('is_live' if d.get('is_live') else 'not_live')
+          status=d.get('live_status')
+          if not status:
+              status='is_live' if d.get('is_live') is True else 'not_live'
           title=str(d.get('title','')).replace('\n',' ')
           print('status=' + status)
           print('live=' + ('true' if status == 'is_live' or d.get('is_live') is True else 'false'))
@@ -86,10 +85,8 @@ jobs:
           print('live_status=' + status)
           PY
 
-          echo "yt-dlp live_status: $(grep '^live_status=' "$GITHUB_OUTPUT" | tail -1 | cut -d= -f2-)"
-
       - name: Stop cleanly when source is offline
-        if: steps.live.outputs.status == 'not_live' || steps.live.outputs.status == 'was_live' || steps.live.outputs.status == 'post_live' || steps.live.outputs.status == 'is_upcoming'
+        if: steps.live.outputs.live != 'true' && steps.live.outputs.status != 'unknown'
         run: |
           echo "Crispulo Reporter is not currently LIVE."
           echo "yt-dlp status: ${{ steps.live.outputs.status }}"
@@ -103,21 +100,16 @@ jobs:
 
       - name: Resolve direct media URL
         if: steps.live.outputs.live == 'true'
-        id: media
         shell: bash
         run: |
           URL="https://www.youtube.com/watch?v=${{ steps.config.outputs.video_id }}"
-          set -o pipefail
+          set +e
           yt-dlp --no-warnings --get-url -f 'best[protocol^=http][height<=720]/best' "$URL" > test-output/media_url.txt 2> test-output/media-url.log
           if [ ! -s test-output/media_url.txt ]; then
-            echo "Normal media URL resolution failed; retrying with web client..."
             yt-dlp --no-warnings --extractor-args 'youtube:player_client=web' --get-url -f 'best[height<=720]/best' "$URL" > test-output/media_url_retry.txt 2> test-output/media-url-retry.log
-            if [ -s test-output/media_url_retry.txt ]; then
-              cp test-output/media_url_retry.txt test-output/media_url.txt
-            fi
+            if [ -s test-output/media_url_retry.txt ]; then cp test-output/media_url_retry.txt test-output/media_url.txt; fi
           fi
           test -s test-output/media_url.txt
-          echo "Direct media URL resolved successfully."
 
       - name: Generate short HLS test
         if: steps.live.outputs.live == 'true'
@@ -133,10 +125,8 @@ jobs:
             -f hls -hls_time 4 -hls_list_size 6 -hls_flags delete_segments+append_list \
             test-output/hls/index.m3u8 > test-output/ffmpeg.log 2>&1
           FFMPEG_RC=$?
-
           if [ -s test-output/hls/index.m3u8 ]; then
             echo "HLS playlist generated successfully."
-            ls -lh test-output/hls
           else
             echo "FFmpeg did not produce an HLS playlist."
             cat test-output/ffmpeg.log || true
@@ -158,7 +148,6 @@ jobs:
             echo "- Reason: ${{ steps.live.outputs.reason || 'N/A' }}"
             if [ -s test-output/hls/index.m3u8 ]; then
               echo '- HLS generation: SUCCESS'
-              echo '- Playlist: test-output/hls/index.m3u8'
             elif [ "${{ steps.live.outputs.status }}" = "unknown" ]; then
               echo '- HLS generation: NOT RUN (detection error)'
             elif [ "${{ steps.live.outputs.live }}" = "true" ]; then
@@ -168,18 +157,10 @@ jobs:
             fi
           } > test-output/report.md
 
-      - name: Upload live HLS test artifact
-        if: steps.live.outputs.live == 'true'
-        uses: actions/upload-artifact@v4
-        with:
-          name: crispulo-hls-test-${{ github.run_number }}
-          path: test-output/
-          retention-days: 2
-
       - name: Upload diagnostic artifact
-        if: always() && steps.live.outputs.live != 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: crispulo-diagnostic-${{ github.run_number }}
+          name: crispulo-check-${{ github.run_number }}
           path: test-output/
           retention-days: 2
