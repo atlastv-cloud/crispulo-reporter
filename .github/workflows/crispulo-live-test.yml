@@ -2,6 +2,8 @@ name: Crispulo Live Test
 
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
   schedule:
     # Run every 5 minutes, offset from minute 00 to reduce GitHub scheduler congestion.
     - cron: '2-59/5 * * * *'
@@ -143,6 +145,7 @@ jobs:
             echo
             echo "- Checked at: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             echo "- Video ID: ${{ steps.config.outputs.video_id }}"
+            echo "- Trigger: ${{ github.event_name }}"
             echo "- Detection status: ${{ steps.live.outputs.status || 'not evaluated' }}"
             echo "- LIVE detected: ${{ steps.live.outputs.live || 'false' }}"
             echo "- Title: ${{ steps.live.outputs.title || 'N/A' }}"
