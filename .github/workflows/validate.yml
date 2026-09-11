@@ -1,0 +1,33 @@
+name: Validate Crispulo Reporter
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate channel configuration
+        run: python3 -m json.tool config/channel.json >/dev/null
+
+      - name: Validate workflow files
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          for p in Path('.github/workflows').glob('*.yml'):
+              text = p.read_text(encoding='utf-8')
+              assert 'name:' in text, f'{p}: missing name'
+              assert 'on:' in text, f'{p}: missing on'
+              assert 'jobs:' in text, f'{p}: missing jobs'
+              print(f'OK: {p}')
+          PY
