@@ -1,0 +1,20 @@
+{
+  "channel": {
+    "id": "crispulo-reporter",
+    "name": "Crispulo Reporter",
+    "enabled": true
+  },
+  "source": {
+    "type": "youtube_live",
+    "video_id": "JvYw0HlgceM",
+    "url": "https://www.youtube.com/live/JvYw0HlgceM"
+  },
+  "output": {
+    "protocol": "hls",
+    "stable_endpoint": "/hls/crispulo-reporter/index.m3u8"
+  },
+  "fallback": {
+    "enabled": true,
+    "mode": "waiting"
+  }
+}
